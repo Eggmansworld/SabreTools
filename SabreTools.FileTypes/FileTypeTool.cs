@@ -242,6 +242,7 @@ namespace SabreTools.FileTypes
                 OutputFormat.TorrentXZ => new XZArchive(),
                 OutputFormat.TorrentXZRomba => new XZArchive(),
                 OutputFormat.TorrentZip => new ZipArchive(),
+                OutputFormat.ZstandardZip => new ZipArchive(zstdCompression: true),
                 _ => null,
             };
         }

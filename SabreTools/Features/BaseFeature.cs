@@ -586,6 +586,13 @@ namespace SabreTools.Features
             "Enable Torrent Zip output",
             detailed: "Instead of outputting files to folder, files will be rebuilt to TorrentZip (TZip) files. This format is based on the ZIP archive format, but with custom header information. This is primarily used by external tool RomVault (http://www.romvault.com/) and is already widely used.");
 
+        internal const string ZstdZipValue = "zstd-zip";
+        internal static FlagInput ZstdZipFlag => new(
+            ZstdZipValue,
+            ["-zzip", "--zstd-zip"],
+            "Enable Zstandard zip output",
+            detailed: "Instead of outputting files to folder, files will be rebuilt to ZIP files compressed with Zstandard (compression method 93). This matches the archive scheme used by RomVault's ZSTD mode and 7-Zip-Zstandard.");
+
         internal const string TotalSizeValue = "total-size";
         internal static FlagInput TotalSizeFlag => new(
             TotalSizeValue,
@@ -1255,6 +1262,8 @@ Some special strings that can be used:
             //    return OutputFormat.TorrentXZ;
             else if (GetBoolean(TorrentZipValue))
                 return OutputFormat.TorrentZip;
+            else if (GetBoolean(ZstdZipValue))
+                return OutputFormat.ZstandardZip;
             else
                 return OutputFormat.Folder;
         }

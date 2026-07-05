@@ -48,6 +48,7 @@ namespace SabreTools.Features
             //AddFeature(SharedInputs.TorrentXzFlag);
             //this[SharedInputs.TorrentXzFlag]!.AddFeature(SharedInputs.RombaFlag);
             Add(TorrentZipFlag);
+            Add(ZstdZipFlag);
 
             Add(HeaderStringInput);
             AddInternalSplitFeatures();

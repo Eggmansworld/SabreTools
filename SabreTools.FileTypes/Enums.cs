@@ -1202,6 +1202,7 @@ namespace SabreTools.FileTypes
         Type17 = 17, // Reserved and unused (SHOULD NOT BE USED)
         IBMTERSE = 18,
         IBMLZ77 = 19,
+        ZStandard = 93,
         WavPak = 97,
         PPMdVersionIRev1 = 98,
     }
@@ -1240,6 +1241,7 @@ namespace SabreTools.FileTypes
         TorrentXZ,
         TorrentXZRomba,
         TapeArchive,
+        ZstandardZip,
 
         // Currently unimplemented fully
         Torrent7Zip,

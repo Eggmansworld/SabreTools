@@ -31,6 +31,11 @@ namespace SabreTools.FileTypes.Archives
             0C-0D		Last mod file date (0x98, 0x21)
         */
 
+        /// <summary>
+        /// Compression method used for written entries
+        /// </summary>
+        private readonly ushort _writeCompressionMethod = (ushort)CompressionMethod.Deflated;
+
         #region Constructors
 
         /// <summary>
@@ -39,6 +44,18 @@ namespace SabreTools.FileTypes.Archives
         public ZipArchive()
             : base()
         {
+        }
+
+        /// <summary>
+        /// Create a new ZipArchive with no base file, optionally compressing
+        /// written entries with Zstandard (method 93) instead of Deflate
+        /// </summary>
+        /// <param name="zstdCompression">True to write Zstandard-compressed entries</param>
+        public ZipArchive(bool zstdCompression)
+            : base()
+        {
+            if (zstdCompression)
+                _writeCompressionMethod = (ushort)CompressionMethod.ZStandard;
         }
 
         /// <summary>
@@ -147,13 +164,14 @@ namespace SabreTools.FileTypes.Archives
             {
                 Stream? stream = null;
 
-#if NET20 || NET35 || NET40
+                // Use the internal Zip implementation so all compression methods
+                // (including Zstandard, method 93) can be read
                 var zf = new Zip();
                 ZipReturn zr = zf.ZipFileOpen(Filename!, -1, true);
                 if (zr != ZipReturn.ZipGood)
                     throw new Exception(CompressUtils.ZipErrorMessageText(zr));
 
-                for (int i = 0; i < zf.LocalFilesCount() && zr == ZipReturn.ZipGood; i++)
+                for (int i = 0; i < zf.LocalFilesCount(); i++)
                 {
                     // Get the entry
                     var entry = zf.GetLocalFile(i);
@@ -171,47 +189,30 @@ namespace SabreTools.FileTypes.Archives
                         continue;
 
                     // Open the entry stream
+                    zr = zf.ZipFileOpenReadStream(i, out Stream? readStream, out ulong streamSize);
+                    if (zr != ZipReturn.ZipGood || readStream is null)
+                        break;
+
+                    // Buffer the entry so it remains readable after the archive is closed
                     realEntry = entry.Filename;
-                    zr = zf.ZipFileOpenReadStream(i, out stream, out ulong streamsize);
+                    stream = new MemoryStream();
+                    byte[] buffer = new byte[_bufferSize];
+                    ulong remaining = streamSize;
+                    int read;
+                    while (remaining > 0
+                        && (read = readStream.Read(buffer, 0, (int)Math.Min((ulong)buffer.Length, remaining))) > 0)
+                    {
+                        stream.Write(buffer, 0, read);
+                        remaining -= (ulong)read;
+                    }
+
+                    zf.ZipFileCloseReadStream();
+                    stream.Seek(0, SeekOrigin.Begin);
                     break;
                 }
 
                 zf.ZipFileClose();
                 return stream;
-#else
-                var zf = ZipFile.OpenRead(Filename)
-                    ?? throw new Exception($"Could not open {Filename} as a zip file");
-
-                for (int i = 0; i < zf.Entries.Count; i++)
-                {
-                    // Get the entry
-                    var entry = zf.Entries[i]; ;
-
-                    // Skip invalid entries
-                    if (entry.FullName is null)
-                        continue;
-
-                    // Skip directory entries
-                    if (entry.FullName.EndsWith(Path.DirectorySeparatorChar.ToString())
-                        || entry.FullName.EndsWith(Path.AltDirectorySeparatorChar.ToString())
-                        || entry.FullName.EndsWith(Path.PathSeparator.ToString()))
-                    {
-                        continue;
-                    }
-
-                    // Skip non-matching keys
-                    if (!entry.FullName.Contains(entryName))
-                        continue;
-
-                    // Open the entry stream
-                    realEntry = entry.FullName;
-                    stream = entry.Open();
-                    break;
-                }
-
-                zf.Dispose();
-                return stream;
-#endif
             }
             catch (Exception ex)
             {
@@ -236,7 +237,8 @@ namespace SabreTools.FileTypes.Archives
 
             try
             {
-#if NET20 || NET35 || NET40
+                // Use the internal Zip implementation so all compression methods
+                // (including Zstandard, method 93) can be read
                 var zf = new Zip();
                 ZipReturn zr = zf.ZipFileOpen(Filename!, -1, true);
                 if (zr != ZipReturn.ZipGood)
@@ -259,7 +261,7 @@ namespace SabreTools.FileTypes.Archives
                     }
 
                     // Open the read stream
-                    zr = zf.ZipFileOpenReadStream(i, false, out Stream? readStream, out _, out _);
+                    zr = zf.ZipFileOpenReadStream(i, false, out Stream? readStream, out ulong streamSize, out _);
 
                     // If we get a read error, log it and continue
                     if (zr != ZipReturn.ZipGood || readStream is null)
@@ -277,10 +279,11 @@ namespace SabreTools.FileTypes.Archives
                         zipEntryRom.Size = (long)localFile.UncompressedSize;
                         zipEntryRom.CRC32 = localFile.CRC;
                     }
-                    // Otherwise, use the stream directly
+                    // Otherwise, use the stream directly, limited to the entry length so
+                    // multi-frame decompressors don't read into the next entry's headers
                     else
                     {
-                        zipEntryRom = FileTypeTool.GetInfo(readStream, _hashTypes);
+                        zipEntryRom = FileTypeTool.GetInfo(new ReadLimitedStream(readStream, (long)streamSize), _hashTypes);
                     }
 
                     // Fill in common details and add to the list
@@ -293,59 +296,6 @@ namespace SabreTools.FileTypes.Archives
                 // Dispose of the archive
                 zr = zf.ZipFileCloseReadStream();
                 zf.ZipFileClose();
-#else
-                var zf = ZipFile.OpenRead(Filename)
-                    ?? throw new Exception($"Could not open {Filename} as a zip file");
-
-                for (int i = 0; i < zf.Entries.Count; i++)
-                {
-                    // Get the local file
-                    var localFile = zf.Entries[i];
-                    if (localFile is null)
-                        continue;
-
-                    // If the entry is a directory (or looks like a directory), we don't want to open it
-                    if (localFile.FullName!.EndsWith(Path.DirectorySeparatorChar.ToString())
-                        || localFile.FullName!.EndsWith(Path.AltDirectorySeparatorChar.ToString())
-                        || localFile.FullName!.EndsWith(Path.PathSeparator.ToString()))
-                    {
-                        continue;
-                    }
-
-                    // Open the read stream
-                    var readStream = localFile.Open();
-                    if (readStream is null)
-                        continue;
-
-                    // Create a blank item for the entry
-                    var zipEntryRom = new BaseFile();
-
-                    // Perform a quickscan, if flagged to
-                    if (_hashTypes.Length == 1 && _hashTypes[0] == HashType.CRC32)
-                    {
-                        zipEntryRom.Size = localFile.Length;
-#if NETCOREAPP
-                        zipEntryRom.CRC32 = BitConverter.GetBytes(localFile.Crc32);
-#else
-                        // TODO: Figure out how to get the CRC from the header
-#endif
-                    }
-                    // Otherwise, use the stream directly
-                    else
-                    {
-                        zipEntryRom = FileTypeTool.GetInfo(readStream, _hashTypes);
-                    }
-
-                    // Fill in common details and add to the list
-                    zipEntryRom.Filename = localFile.FullName;
-                    zipEntryRom.Parent = gamename;
-                    zipEntryRom.Date = localFile.LastWriteTime.ToString("yyyy/MM/dd HH:mm:ss");
-                    found.Add(zipEntryRom);
-                }
-
-                // Dispose of the archive
-                zf.Dispose();
-#endif
             }
             catch (Exception ex)
             {
@@ -530,11 +480,11 @@ namespace SabreTools.FileTypes.Archives
                     {
                         long msDosDateTime = dt.ConvertToMsDosTimeFormat();
                         TimeStamps ts = new() { ModTime = msDosDateTime };
-                        zipFile.ZipFileOpenWriteStream(false, false, baseFile.Filename.Replace('\\', '/'), istreamSize, (ushort)CompressionMethod.Deflated, out writeStream, ts);
+                        zipFile.ZipFileOpenWriteStream(false, false, baseFile.Filename.Replace('\\', '/'), istreamSize, _writeCompressionMethod, out writeStream, ts);
                     }
                     else
                     {
-                        zipFile.ZipFileOpenWriteStream(false, true, baseFile.Filename.Replace('\\', '/'), istreamSize, (ushort)CompressionMethod.Deflated, out writeStream, null);
+                        zipFile.ZipFileOpenWriteStream(false, true, baseFile.Filename.Replace('\\', '/'), istreamSize, _writeCompressionMethod, out writeStream, null);
                     }
 
                     // Copy the input stream to the output
@@ -604,11 +554,11 @@ namespace SabreTools.FileTypes.Archives
                             {
                                 long msDosDateTime = dt.ConvertToMsDosTimeFormat();
                                 TimeStamps ts = new() { ModTime = msDosDateTime };
-                                zipFile.ZipFileOpenWriteStream(false, false, baseFile.Filename.Replace('\\', '/'), istreamSize, (ushort)CompressionMethod.Deflated, out writeStream, ts);
+                                zipFile.ZipFileOpenWriteStream(false, false, baseFile.Filename.Replace('\\', '/'), istreamSize, _writeCompressionMethod, out writeStream, ts);
                             }
                             else
                             {
-                                zipFile.ZipFileOpenWriteStream(false, true, baseFile.Filename.Replace('\\', '/'), istreamSize, (ushort)CompressionMethod.Deflated, out writeStream, null);
+                                zipFile.ZipFileOpenWriteStream(false, true, baseFile.Filename.Replace('\\', '/'), istreamSize, _writeCompressionMethod, out writeStream, null);
                             }
 
                             // Copy the input stream to the output
@@ -630,7 +580,7 @@ namespace SabreTools.FileTypes.Archives
                             oldZipFile.ZipFileOpenReadStream(index, false, out Stream? zreadStream, out ulong istreamSize, out ushort icompressionMethod);
                             long msDosDateTime = oldZipFile.GetLocalFile(index).LastModified;
                             TimeStamps ts = new() { ModTime = msDosDateTime };
-                            zipFile.ZipFileOpenWriteStream(false, true, oldZipFile.GetLocalFile(index).Filename!, istreamSize, (ushort)CompressionMethod.Deflated, out writeStream, ts);
+                            zipFile.ZipFileOpenWriteStream(false, true, oldZipFile.GetLocalFile(index).Filename!, istreamSize, _writeCompressionMethod, out writeStream, ts);
 
                             // Copy the input stream to the output
                             byte[] ibuffer = new byte[_bufferSize];
@@ -738,11 +688,11 @@ namespace SabreTools.FileTypes.Archives
                         {
                             long msDosDateTime = dt.ConvertToMsDosTimeFormat();
                             TimeStamps ts = new() { ModTime = msDosDateTime };
-                            zipFile.ZipFileOpenWriteStream(false, false, baseFiles[index].Filename!.Replace('\\', '/'), istreamSize, (ushort)CompressionMethod.Deflated, out writeStream, ts);
+                            zipFile.ZipFileOpenWriteStream(false, false, baseFiles[index].Filename!.Replace('\\', '/'), istreamSize, _writeCompressionMethod, out writeStream, ts);
                         }
                         else
                         {
-                            zipFile.ZipFileOpenWriteStream(false, true, baseFiles[index].Filename!.Replace('\\', '/'), istreamSize, (ushort)CompressionMethod.Deflated, out writeStream, null);
+                            zipFile.ZipFileOpenWriteStream(false, true, baseFiles[index].Filename!.Replace('\\', '/'), istreamSize, _writeCompressionMethod, out writeStream, null);
                         }
 
                         // Copy the input stream to the output
@@ -820,11 +770,11 @@ namespace SabreTools.FileTypes.Archives
                             {
                                 long msDosDateTime = dt.ConvertToMsDosTimeFormat();
                                 TimeStamps ts = new() { ModTime = msDosDateTime };
-                                zipFile.ZipFileOpenWriteStream(false, false, baseFiles[-index - 1].Filename!.Replace('\\', '/'), istreamSize, (ushort)CompressionMethod.Deflated, out writeStream, ts);
+                                zipFile.ZipFileOpenWriteStream(false, false, baseFiles[-index - 1].Filename!.Replace('\\', '/'), istreamSize, _writeCompressionMethod, out writeStream, ts);
                             }
                             else
                             {
-                                zipFile.ZipFileOpenWriteStream(false, true, baseFiles[-index - 1].Filename!.Replace('\\', '/'), istreamSize, (ushort)CompressionMethod.Deflated, out writeStream, null);
+                                zipFile.ZipFileOpenWriteStream(false, true, baseFiles[-index - 1].Filename!.Replace('\\', '/'), istreamSize, _writeCompressionMethod, out writeStream, null);
                             }
 
                             // Copy the input stream to the output
@@ -847,7 +797,7 @@ namespace SabreTools.FileTypes.Archives
                             oldZipFile.ZipFileOpenReadStream(index, false, out Stream? zreadStream, out ulong istreamSize, out ushort icompressionMethod);
                             long msDosDateTime = oldZipFile.GetLocalFile(index).LastModified;
                             TimeStamps ts = new() { ModTime = msDosDateTime };
-                            zipFile.ZipFileOpenWriteStream(false, true, oldZipFile.GetLocalFile(index).Filename!, istreamSize, (ushort)CompressionMethod.Deflated, out writeStream, ts);
+                            zipFile.ZipFileOpenWriteStream(false, true, oldZipFile.GetLocalFile(index).Filename!, istreamSize, _writeCompressionMethod, out writeStream, ts);
 
                             // Copy the input stream to the output
                             byte[] ibuffer = new byte[_bufferSize];
